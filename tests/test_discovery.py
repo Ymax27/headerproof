@@ -4,6 +4,7 @@ from headerproof.discovery import (
     DiscoveryDecision,
     build_discovery_baseline,
     dedupe_candidates,
+    discovery_batches,
     isolate_candidates,
     response_differs,
 )
@@ -150,3 +151,26 @@ def test_isolation_limit_stops_after_requested_number_of_headers() -> None:
     assert [item.name for item in found] == ["X-A", "X-B"]
     # Root + left subtree + two singleton repeats. The right half is never probed.
     assert calls == 6
+
+
+def test_discovery_batches_add_interleaved_partition() -> None:
+    names = [f"X-{index}" for index in range(8)]
+    batches = discovery_batches(names, batch_size=4)
+    assert batches[:2] == [["X-0", "X-1", "X-2", "X-3"], ["X-4", "X-5", "X-6", "X-7"]]
+    assert ["X-0", "X-2", "X-4", "X-6"] in batches
+    assert ["X-1", "X-3", "X-5", "X-7"] in batches
+
+
+def test_discovery_batches_validate_batch_size() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="batch_size must be positive"):
+        discovery_batches(["X-A"], batch_size=0)
+
+
+def test_interleaved_partition_can_break_contiguous_cancellation_pair() -> None:
+    names = ["X-A", "X-B", "X-C", "X-D"]
+    batches = discovery_batches(names, batch_size=2)
+    # A and B cancel only when sent together. The second partition separates them.
+    assert ["X-A", "X-C"] in batches
+    assert ["X-B", "X-D"] in batches

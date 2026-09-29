@@ -32,6 +32,7 @@ from .discovery import (
     DiscoveryDecision,
     build_discovery_baseline,
     dedupe_candidates,
+    discovery_batches,
     isolate_candidates,
     response_differs,
 )
@@ -506,7 +507,11 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
             discovered: list[DiscoveredHeader] = []
             evaluated_candidates = 0
             truncation_reason = ""
-            for start in range(0, len(candidates), BATCH_SIZE):
+            for batch in discovery_batches(candidates, BATCH_SIZE):
+                discovered_keys = {item.name.casefold() for item in discovered}
+                batch = [name for name in batch if name.casefold() not in discovered_keys]
+                if not batch:
+                    continue
                 if budget.expired():
                     truncation_reason = "url_budget_exhausted"
                     break
@@ -516,7 +521,6 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
                 if len(discovered) >= MAX_DISCOVERED_HEADERS:
                     truncation_reason = "discovered_header_limit"
                     break
-                batch = candidates[start : start + BATCH_SIZE]
                 remaining = MAX_DISCOVERED_HEADERS - len(discovered)
                 before_requests = discovery_requests
                 batch_discovered = isolate_candidates(batch, affects, limit=remaining)

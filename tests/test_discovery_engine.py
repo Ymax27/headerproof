@@ -134,3 +134,44 @@ def test_discovery_reports_header_limit_truncation_and_measured_requests() -> No
     assert discovery["requests"] <= 32
     assert discovery["evaluated_candidates"] < discovery["candidate_count"]
     assert AllImpactHandler.request_count >= discovery["requests"]
+
+
+class CancellationHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:
+        scheme = self.headers.get("X-Forwarded-Scheme")
+        proto = self.headers.get("X-Forwarded-Proto")
+        # Deliberate cancellation: either header alone changes the response,
+        # but the contiguous pair together returns the baseline body.
+        if bool(scheme) ^ bool(proto):
+            body = f"changed {scheme or proto}".encode()
+        else:
+            body = b"stable"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("X-Cache", "MISS")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_second_partition_recovers_header_masked_by_contiguous_batch_cancellation() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CancellationHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/cancellation"
+        args = parse_cli_args([url])
+        args.enabled_checks = {"cache-poisoning", "header-injection", "content-spoofing"}
+        args.per_url_concurrency = 1
+        args.concurrency = 1
+        args.no_live_alerts = True
+        result = scan_url(url, args)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    names = {item["name"] for item in result["discovery"]["discovered_headers"]}
+    assert {"X-Forwarded-Scheme", "X-Forwarded-Proto"} <= names

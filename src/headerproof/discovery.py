@@ -136,3 +136,20 @@ def isolate_candidates(
     if remaining == 0:
         return left
     return left + isolate_candidates(names[middle:], affects, limit=remaining)
+
+
+def discovery_batches(candidates: Sequence[str], batch_size: int = BATCH_SIZE) -> list[list[str]]:
+    """Return two deterministic partitions to reduce batch-cancellation false negatives.
+
+    The second interleaved pass changes which candidates share a request. A candidate
+    masked by another header in the contiguous partition can therefore still reach
+    singleton isolation without falling back to one request per candidate.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    contiguous = [list(candidates[start : start + batch_size]) for start in range(0, len(candidates), batch_size)]
+    if len(candidates) <= 1:
+        return contiguous
+    bucket_count = max(1, (len(candidates) + batch_size - 1) // batch_size)
+    interleaved = [list(candidates[offset::bucket_count]) for offset in range(bucket_count)]
+    return contiguous + [batch for batch in interleaved if batch and batch not in contiguous]
