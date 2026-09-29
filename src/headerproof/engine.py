@@ -506,7 +506,7 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
                 return response_differs(discovery_baseline, response, discovery_marker)
 
             discovered: list[DiscoveredHeader] = []
-            evaluated_candidates = 0
+            evaluated_candidate_names: set[str] = set()
             truncation_reason = ""
             for batch in discovery_batches(candidates, BATCH_SIZE):
                 discovered_keys = {item.name.casefold() for item in discovered}
@@ -534,7 +534,7 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
                     and discovery_requests < MAX_DISCOVERY_REQUESTS
                     and not budget.expired()
                 ):
-                    evaluated_candidates += len(batch)
+                    evaluated_candidate_names.update(name.casefold() for name in batch)
                 elif discovery_requests == before_requests:
                     truncation_reason = truncation_reason or "discovery_not_progressed"
                     break
@@ -549,7 +549,7 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
             result["discovery"] = {
                 "baseline_samples": len(baseline_samples),
                 "candidate_count": len(candidates),
-                "evaluated_candidates": evaluated_candidates,
+                "evaluated_candidates": len(evaluated_candidate_names),
                 "requests": discovery_requests,
                 "discovered_headers": [
                     {"name": item.name, "reason": item.reason} for item in discovered

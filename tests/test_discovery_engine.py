@@ -61,6 +61,7 @@ def test_dynamic_discovery_finds_non_default_header_before_confirmation() -> Non
     assert result["discovery"]["discovered_headers"] == [
         {"name": "X-Forwarded-Scheme", "reason": "marker_reflected"}
     ]
+    assert result["discovery"]["evaluated_candidates"] <= result["discovery"]["candidate_count"]
     confirmed = [
         item
         for item in result["signals"]
