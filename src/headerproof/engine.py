@@ -4,6 +4,7 @@ import argparse
 import concurrent.futures
 import secrets
 import threading
+from collections.abc import Sequence
 from typing import Any
 from urllib import parse
 
@@ -20,6 +21,19 @@ from .detectors import (
     default_header_probe_names,
     default_origin_variants,
     header_probe_value,
+)
+from .discovery import (
+    BASELINE_SAMPLES,
+    BATCH_SIZE,
+    DISCOVERY_HEADERS,
+    MAX_DISCOVERED_HEADERS,
+    MAX_DISCOVERY_REQUESTS,
+    DiscoveredHeader,
+    DiscoveryDecision,
+    build_discovery_baseline,
+    dedupe_candidates,
+    isolate_candidates,
+    response_differs,
 )
 from .evidence import make_signal, signal_passes_fp_filter
 from .input import add_query, add_raw_query
@@ -446,8 +460,90 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
 
         add_task("crlf", "header-injection", crlf_task)
 
+    discovered_headers: list[str] = []
+    if "cache-poisoning" in checks and not args.no_cache_confirm:
+        default_headers = default_header_probe_names(args.header, args.header_probe_limit)
+        candidates = dedupe_candidates(DISCOVERY_HEADERS, [*default_headers, *args.header])
+        discovery_marker = f"{new_canary()}.invalid"
+        baseline_samples: list[HttpSnapshot] = []
+        for _ in range(BASELINE_SAMPLES):
+            probe_id = new_probe_id("discovery-baseline")
+            discovery_url = add_query(url, {"pa_discovery": probe_id})
+            sample = fetch_budgeted(
+                discovery_url,
+                headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+                probe_id=probe_id,
+                role="discovery-baseline",
+                detector="cache-poisoning",
+                client_context=f"{probe_id}:discovery-baseline",
+            )
+            if sample is not None:
+                baseline_samples.append(sample)
+        discovery_baseline = build_discovery_baseline(baseline_samples)
+        discovery_requests = len(baseline_samples)
+        if discovery_baseline is not None and not budget.expired():
+            def affects(candidate_names: Sequence[str]) -> DiscoveryDecision:
+                nonlocal discovery_requests
+                if discovery_requests >= MAX_DISCOVERY_REQUESTS or budget.expired():
+                    return DiscoveryDecision("inconclusive", "discovery_budget_exhausted")
+                probe_id = new_probe_id("discovery")
+                discovery_url = add_query(url, {"pa_discovery": probe_id})
+                headers = {name: discovery_marker for name in candidate_names}
+                headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+                response = fetch_budgeted(
+                    discovery_url,
+                    headers=headers,
+                    probe_id=probe_id,
+                    role="discovery-batch" if len(candidate_names) > 1 else "discovery-singleton",
+                    detector="cache-poisoning",
+                    client_context=f"{probe_id}:discovery",
+                )
+                discovery_requests += 1
+                if response is None:
+                    return DiscoveryDecision("inconclusive", "request_not_completed")
+                return response_differs(discovery_baseline, response, discovery_marker)
+
+            discovered: list[DiscoveredHeader] = []
+            discovery_truncated = False
+            for start in range(0, len(candidates), BATCH_SIZE):
+                if budget.expired() or len(discovered) >= MAX_DISCOVERED_HEADERS:
+                    discovery_truncated = len(discovered) >= MAX_DISCOVERED_HEADERS
+                    break
+                remaining = MAX_DISCOVERED_HEADERS - len(discovered)
+                discovered.extend(
+                    isolate_candidates(
+                        candidates[start : start + BATCH_SIZE],
+                        affects,
+                        limit=remaining,
+                    )
+                )
+            discovered_headers = [item.name for item in discovered]
+            result["discovery"] = {
+                "baseline_samples": len(baseline_samples),
+                "candidate_count": len(candidates),
+                "requests": discovery_requests,
+                "discovered_headers": [
+                    {"name": item.name, "reason": item.reason} for item in discovered
+                ],
+                "truncated": discovery_truncated,
+                "request_limit_reached": discovery_requests >= MAX_DISCOVERY_REQUESTS,
+                "cache_isolation": "unverified_during_discovery",
+            }
+        else:
+            result["discovery"] = {
+                "baseline_samples": len(baseline_samples),
+                "candidate_count": len(candidates),
+                "requests": discovery_requests,
+                "discovered_headers": [],
+                "status": "baseline_unavailable",
+                "cache_isolation": "unverified_during_discovery",
+            }
+
     if {"header-injection", "cache-poisoning", "content-spoofing"} & checks:
-        for header_name in default_header_probe_names(args.header, args.header_probe_limit):
+        header_names = dedupe_candidates(
+            [*default_header_probe_names(args.header, args.header_probe_limit), *discovered_headers]
+        )
+        for header_name in header_names:
             probe_id = new_probe_id("header")
             oob_capable = header_name.lower() in {"x-forwarded-host", "x-host", "x-forwarded-server", "forwarded"}
             oob_enabled = bool(args.oob_api and args.oob_domain and oob_capable)
