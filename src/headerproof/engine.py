@@ -491,11 +491,12 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
                 discovery_url = add_query(url, {"pa_discovery": probe_id})
                 headers = {name: discovery_marker for name in candidate_names}
                 headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+                role = "discovery-batch" if len(candidate_names) > 1 else "discovery-singleton"
                 response = fetch_budgeted(
                     discovery_url,
                     headers=headers,
                     probe_id=probe_id,
-                    role="discovery-batch" if len(candidate_names) > 1 else "discovery-singleton",
+                    role=role,
                     detector="cache-poisoning",
                     client_context=f"{probe_id}:discovery",
                 )

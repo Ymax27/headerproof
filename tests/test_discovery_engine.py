@@ -175,3 +175,109 @@ def test_second_partition_recovers_header_masked_by_contiguous_batch_cancellatio
 
     names = {item["name"] for item in result["discovery"]["discovered_headers"]}
     assert {"X-Forwarded-Scheme", "X-Forwarded-Proto"} <= names
+
+
+
+def test_discovery_probe_exchange_preserves_candidate_lineage() -> None:
+    result = run_fixture()
+    singleton = [
+        probe
+        for probe in result["probes"]
+        if probe["role"] == "discovery-singleton"
+        and "X-Forwarded-Scheme" in (probe.get("exchange") or {}).get("request", {}).get("headers", {})
+    ]
+    assert singleton
+    assert singleton[0]["exchange"]["request"]["headers"]["X-Forwarded-Scheme"].endswith(".invalid")
+
+
+class IgnoredQueryCacheHandler(BaseHTTPRequestHandler):
+    cache: dict[str, bytes] = {}
+
+    def log_message(self, _format: str, *args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:
+        key = self.path.split("?", 1)[0]
+        no_cache = "no-cache" in self.headers.get("Cache-Control", "").lower()
+        cached = self.cache.get(key)
+        if cached is not None and not no_cache:
+            body = cached
+            cache_status = "HIT"
+        else:
+            scheme = self.headers.get("X-Forwarded-Scheme", "")
+            body = (f"scheme={scheme}" if scheme else "scheme=https").encode()
+            cache_status = "MISS"
+            if not no_cache:
+                self.cache[key] = body
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Cache-Control", "public, max-age=120")
+        self.send_header("X-Cache", cache_status)
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_discovered_header_cannot_bypass_phase1_cache_key_gate() -> None:
+    IgnoredQueryCacheHandler.cache = {}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), IgnoredQueryCacheHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/ignored-query"
+        args = parse_cli_args([url])
+        args.enabled_checks = {"cache-poisoning", "header-injection", "content-spoofing"}
+        args.per_url_concurrency = 1
+        args.concurrency = 1
+        args.no_live_alerts = True
+        result = scan_url(url, args)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    names = {item["name"] for item in result["discovery"]["discovered_headers"]}
+    assert "X-Forwarded-Scheme" in names
+    assert not any(item["type"] == "cache_poisoning_shared_cache_confirmed" for item in result["signals"])
+
+
+class SlowDiscoveryHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:
+        import time
+
+        time.sleep(0.18)
+        body = b"stable"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+
+def test_discovery_url_budget_exhaustion_is_explicit() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowDiscoveryHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/slow"
+        args = parse_cli_args([url])
+        args.enabled_checks = {"cache-poisoning", "header-injection", "content-spoofing"}
+        args.per_url_concurrency = 1
+        args.concurrency = 1
+        args.no_live_alerts = True
+        args.url_timeout = 0.85
+        args.timeout = 0.5
+        result = scan_url(url, args)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result["status"] == "partial_timeout"
+    assert result["discovery"]["truncated"] is True
+    assert result["discovery"]["truncation_reason"] == "url_budget_exhausted"
+    assert any(error.get("error_type") == "url_timeout" for error in result["errors"])
