@@ -84,3 +84,53 @@ def test_explicit_header_is_removed_from_discovery_candidates() -> None:
     ]
     assert len(confirmed) == 1
     assert confirmed[0]["evidence"]["probe_header"] == "X-Forwarded-Scheme"
+
+
+class AllImpactHandler(BaseHTTPRequestHandler):
+    request_count = 0
+
+    def log_message(self, _format: str, *args: Any) -> None:
+        return
+
+    def do_GET(self) -> None:
+        type(self).request_count += 1
+        values = [
+            value
+            for name, value in self.headers.items()
+            if name.casefold().startswith(("x-", "front-end", "true-client"))
+        ]
+        body = ("stable " + " ".join(values)).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Cache-Control", "public, max-age=120")
+        self.send_header("X-Cache", "MISS")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_discovery_reports_header_limit_truncation_and_measured_requests() -> None:
+    AllImpactHandler.request_count = 0
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AllImpactHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/vulnerable"
+        args = parse_cli_args([url])
+        args.enabled_checks = {"cache-poisoning", "header-injection", "content-spoofing"}
+        args.per_url_concurrency = 1
+        args.concurrency = 1
+        args.no_live_alerts = True
+        result = scan_url(url, args)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    discovery = result["discovery"]
+    assert len(discovery["discovered_headers"]) == 4
+    assert discovery["truncated"] is True
+    assert discovery["truncation_reason"] == "discovered_header_limit"
+    assert discovery["request_limit_reached"] is False
+    assert discovery["requests"] <= 32
+    assert discovery["evaluated_candidates"] < discovery["candidate_count"]
+    assert AllImpactHandler.request_count >= discovery["requests"]

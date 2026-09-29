@@ -504,28 +504,53 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
                 return response_differs(discovery_baseline, response, discovery_marker)
 
             discovered: list[DiscoveredHeader] = []
-            discovery_truncated = False
+            evaluated_candidates = 0
+            truncation_reason = ""
             for start in range(0, len(candidates), BATCH_SIZE):
-                if budget.expired() or len(discovered) >= MAX_DISCOVERED_HEADERS:
-                    discovery_truncated = len(discovered) >= MAX_DISCOVERED_HEADERS
+                if budget.expired():
+                    truncation_reason = "url_budget_exhausted"
                     break
+                if discovery_requests >= MAX_DISCOVERY_REQUESTS:
+                    truncation_reason = "discovery_request_limit"
+                    break
+                if len(discovered) >= MAX_DISCOVERED_HEADERS:
+                    truncation_reason = "discovered_header_limit"
+                    break
+                batch = candidates[start : start + BATCH_SIZE]
                 remaining = MAX_DISCOVERED_HEADERS - len(discovered)
-                discovered.extend(
-                    isolate_candidates(
-                        candidates[start : start + BATCH_SIZE],
-                        affects,
-                        limit=remaining,
+                before_requests = discovery_requests
+                batch_discovered = isolate_candidates(batch, affects, limit=remaining)
+                discovered.extend(batch_discovered)
+                # A batch is fully evaluated only when isolation did not stop on
+                # the discovered-header/request/URL budget. This is evidence
+                # accounting, not a claim that every candidate was singleton-probed.
+                if (
+                    len(discovered) < MAX_DISCOVERED_HEADERS
+                    and discovery_requests < MAX_DISCOVERY_REQUESTS
+                    and not budget.expired()
+                ):
+                    evaluated_candidates += len(batch)
+                elif discovery_requests == before_requests:
+                    truncation_reason = truncation_reason or "discovery_not_progressed"
+                    break
+                else:
+                    truncation_reason = (
+                        "url_budget_exhausted" if budget.expired()
+                        else "discovery_request_limit" if discovery_requests >= MAX_DISCOVERY_REQUESTS
+                        else "discovered_header_limit"
                     )
-                )
+                    break
             discovered_headers = [item.name for item in discovered]
             result["discovery"] = {
                 "baseline_samples": len(baseline_samples),
                 "candidate_count": len(candidates),
+                "evaluated_candidates": evaluated_candidates,
                 "requests": discovery_requests,
                 "discovered_headers": [
                     {"name": item.name, "reason": item.reason} for item in discovered
                 ],
-                "truncated": discovery_truncated,
+                "truncated": bool(truncation_reason),
+                "truncation_reason": truncation_reason or None,
                 "request_limit_reached": discovery_requests >= MAX_DISCOVERY_REQUESTS,
                 "cache_isolation": "unverified_during_discovery",
             }
@@ -533,8 +558,12 @@ def scan_url(url: str, args: argparse.Namespace) -> dict[str, Any]:
             result["discovery"] = {
                 "baseline_samples": len(baseline_samples),
                 "candidate_count": len(candidates),
+                "evaluated_candidates": 0,
                 "requests": discovery_requests,
                 "discovered_headers": [],
+                "truncated": False,
+                "truncation_reason": None,
+                "request_limit_reached": discovery_requests >= MAX_DISCOVERY_REQUESTS,
                 "status": "baseline_unavailable",
                 "cache_isolation": "unverified_during_discovery",
             }
