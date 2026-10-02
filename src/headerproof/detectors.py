@@ -39,6 +39,9 @@ def cache_indicators(snap: HttpSnapshot) -> list[str]:
         "surrogate-control",
         "akamai-cache-status",
         "server-timing",
+        "x-litespeed-cache",
+        "x-lsadc-cache",
+        "x-qc-cache",
     ):
         value = header_join(snap, name)
         if value:
@@ -84,6 +87,11 @@ def shared_cache_hit_markers(indicators: list[str]) -> list[str]:
             # responses served from, or validated through, cache. MISS/BYPASS/
             # DYNAMIC/EXPIRED are deliberately not promoted as hit evidence.
             if value_l.strip() in {"hit", "stale", "updating", "revalidated"}:
+                markers.append(indicator)
+        elif name_l in {"x-litespeed-cache", "x-lsadc-cache", "x-qc-cache"}:
+            # LiteSpeed documents "hit" as served from LSCache and "miss" as
+            # uncached. Only that exact hit token counts for these headers.
+            if value_l.strip() == "hit":
                 markers.append(indicator)
         elif name_l in {"cache-status", "akamai-cache-status", "server-timing"}:
             has_hit = re.search(r"\b(hit|cached|revalidated)\b", value_l)
