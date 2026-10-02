@@ -6,6 +6,7 @@ from typing import Any
 from .constants import CACHEABLE_STATUSES, LIKELY_AUTH_COOKIE, TEXTUAL_CONTENT, UNSAFE_METHODS
 from .evidence import make_signal
 from .models import HttpSnapshot
+from .oob import accepted_oob_events
 from .templates import extract_template_evidence, template_matches
 
 
@@ -39,6 +40,9 @@ def cache_indicators(snap: HttpSnapshot) -> list[str]:
         "surrogate-control",
         "akamai-cache-status",
         "server-timing",
+        "x-litespeed-cache",
+        "x-lsadc-cache",
+        "x-qc-cache",
     ):
         value = header_join(snap, name)
         if value:
@@ -84,6 +88,11 @@ def shared_cache_hit_markers(indicators: list[str]) -> list[str]:
             # responses served from, or validated through, cache. MISS/BYPASS/
             # DYNAMIC/EXPIRED are deliberately not promoted as hit evidence.
             if value_l.strip() in {"hit", "stale", "updating", "revalidated"}:
+                markers.append(indicator)
+        elif name_l in {"x-litespeed-cache", "x-lsadc-cache", "x-qc-cache"}:
+            # LiteSpeed documents "hit" as served from LSCache and "miss" as
+            # uncached. Only that exact hit token counts for these headers.
+            if value_l.strip() == "hit":
                 markers.append(indicator)
         elif name_l in {"cache-status", "akamai-cache-status", "server-timing"}:
             has_hit = re.search(r"\b(hit|cached|revalidated)\b", value_l)
@@ -387,11 +396,12 @@ def analyze_oob_header_probe(
     probe: HttpSnapshot,
     save_body: bool,
 ) -> list[dict[str, Any]]:
-    protocols = sorted({str(item.get("protocol", "unknown")) for item in events})
+    matched = accepted_oob_events(events, token)
+    protocols = sorted({item["protocol"] for item in matched})
     context = {
-        "oob_confirmed": bool(events),
+        "oob_confirmed": bool(matched),
         "protocols": protocols,
-        "event_count": len(events),
+        "event_count": len(matched),
     }
     if not template_matches("blind_header_oob_confirmed", context):
         return []
@@ -400,7 +410,12 @@ def analyze_oob_header_probe(
             "header-injection", "blind_header_oob_confirmed", "high", "high",
             "Header probe produced an out-of-band callback",
             template_evidence(
-                "blind_header_oob_confirmed", context, probe_header=header_name, oob_token=token, oob_confirmed=True
+                "blind_header_oob_confirmed",
+                context,
+                probe_header=header_name,
+                oob_token=token,
+                oob_confirmed=True,
+                oob_callbacks=matched,
             ),
             probe,
             "Confirm the callback is attributable to the tested request and document the backend interaction.",
