@@ -545,6 +545,62 @@ def test_scan_timeout_keeps_batch_moving(tmp_path: Path) -> None:
         server.server_close()
 
 
+def test_partial_url_timeout_is_scan_error_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class SlowAfterBaseline(BaseHTTPRequestHandler):
+        seen = 0
+        lock = threading.Lock()
+
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            return
+
+        def do_GET(self) -> None:
+            self._respond()
+
+        def do_OPTIONS(self) -> None:
+            self._respond()
+
+        def _respond(self) -> None:
+            with SlowAfterBaseline.lock:
+                SlowAfterBaseline.seen += 1
+                slow = SlowAfterBaseline.seen > 1
+            if slow:
+                time.sleep(1)
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    from headerproof.engine import UrlBudget
+
+    class ShortUrlBudget(UrlBudget):
+        def __init__(self, seconds: float) -> None:
+            super().__init__(0.15)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowAfterBaseline)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        monkeypatch.setattr("headerproof.engine.UrlBudget", ShortUrlBudget)
+        url = f"http://127.0.0.1:{server.server_port}/budget"
+        rc = header_active_scan.main_from_args([url, "-c", "1", "-silent"])
+        runs = tmp_path / "state" / "headerproof" / "runs"
+        result = json.loads(next(runs.iterdir()).joinpath("results.jsonl").read_text().splitlines()[0])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result["status"] == "partial_timeout"
+    assert rc == 2
+    capsys.readouterr()
+
+
 def test_unreachable_baseline_is_error_not_scanned(tmp_path: Path) -> None:
     input_file = tmp_path / "urls.txt"
     input_file.write_text("http://127.0.0.1:1/\n")

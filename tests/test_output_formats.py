@@ -51,13 +51,17 @@ def test_export_sarif_uses_signal_records(tmp_path: Path) -> None:
 
 
 def test_ci_exit_code_contract_is_stable() -> None:
-    clean = {"error": 0, "partial_error": 0, "verified_technical_signals": 0}
-    findings = {"error": 0, "partial_error": 0, "verified_technical_signals": 1}
-    error = {"error": 1, "partial_error": 0, "verified_technical_signals": 0}
-    partial_error = {"error": 0, "partial_error": 1, "verified_technical_signals": 1}
+    clean = {"error": 0, "partial_error": 0, "partial_timeout": 0, "verified_technical_signals": 0}
+    findings = {"error": 0, "partial_error": 0, "partial_timeout": 0, "verified_technical_signals": 1}
+    error = {"error": 1, "partial_error": 0, "partial_timeout": 0, "verified_technical_signals": 0}
+    partial_error = {"error": 0, "partial_error": 1, "partial_timeout": 0, "verified_technical_signals": 1}
+    partial_timeout = {"error": 0, "partial_error": 0, "partial_timeout": 1, "verified_technical_signals": 0}
+    mixed_timeout = {"error": 0, "partial_error": 0, "partial_timeout": 1, "verified_technical_signals": 2}
 
     assert _result_exit_code(clean, False) == EXIT_CLEAN == 0
     assert _result_exit_code(findings, False) == EXIT_FINDINGS == 1
     assert _result_exit_code(error, False) == EXIT_SCAN_ERROR == 2
     assert _result_exit_code(partial_error, False) == EXIT_SCAN_ERROR == 2
+    assert _result_exit_code(partial_timeout, False) == EXIT_SCAN_ERROR == 2
+    assert _result_exit_code(mixed_timeout, False) == EXIT_SCAN_ERROR == 2
     assert _result_exit_code(clean, True) == EXIT_INTERRUPTED == 130
