@@ -182,7 +182,11 @@ def _payload_count(payload: dict[str, object], key: str) -> int:
 def _result_exit_code(payload: dict[str, object], interrupted: bool) -> int:
     if interrupted:
         return EXIT_INTERRUPTED
-    if _payload_count(payload, "error") or _payload_count(payload, "partial_error"):
+    if (
+        _payload_count(payload, "error")
+        or _payload_count(payload, "partial_error")
+        or _payload_count(payload, "partial_timeout")
+    ):
         return EXIT_SCAN_ERROR
     if _payload_count(payload, "verified_technical_signals"):
         return EXIT_FINDINGS
