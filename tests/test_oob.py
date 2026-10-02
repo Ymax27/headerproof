@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import socket
 import struct
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib import request
 
